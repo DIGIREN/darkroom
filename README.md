@@ -3,7 +3,7 @@
 # darkroom
 
 Darkroom companion for a **rooted Rabbit R1 running LineageOS** (flashed with
-[tap-root](../../../tap-root)).
+[tap-root](https://github.com/DIGIREN/tap-root)).
 
 # Features
 

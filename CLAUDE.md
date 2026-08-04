@@ -30,9 +30,15 @@ register except manifest components.
   been de-janked twice; `tts.speak`, `requestAudioFocus`,
   `AppWidgetManager.updateAppWidget`, and bitmap rendering all live on `snd`.
   Do not move them back.
-- **Do not touch `display_temperature_mode`.** Setting it to 0 turns
-  LiveDisplay off entirely, which stops it applying the color adjustment the
-  Safelight tile depends on. The tile parks only `display_auto_outdoor_mode`.
+- **Do not touch `display_temperature_mode`.** The tile parks only
+  `display_auto_outdoor_mode`. 0 is this build's own default for the
+  temperature mode and is fine; writing it yourself is not, and the provider
+  rejects deleting the row.
+- **Safelight can look broken after a reboot even when it is set correctly.**
+  The setting persists and `dumpsys SurfaceFlinger` shows the red-only matrix,
+  but the display sometimes comes up not applying it. Re-writing the value and
+  rebooting restores it. Check the matrix first - if it is already red-only,
+  the setting is not the problem and nothing in the app needs changing.
 - **First-run state lives in `shared_prefs/safelight.xml`** (processes as
   JSON, setup flags, voice choice). `adb shell pm clear` destroys a user's
   chemistry - never run it casually on a device someone uses. A stock C-41 is
