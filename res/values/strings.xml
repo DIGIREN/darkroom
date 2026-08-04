@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Darkroom</string>
+    <string name="wallpaper_desc">A small rabbit developing photomicrographs under safelight.</string>
+    <string name="tile_safelight">Safelight</string>
+    <string name="timer_name">Darkroom Timer</string>
+    <string name="widget_glyph">⏱</string>
+</resources>

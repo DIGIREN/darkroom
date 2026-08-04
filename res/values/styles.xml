@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dialogs in the darkroom palette: black ground, red type, no white. -->
+    <style name="DarkroomDialog" parent="@android:style/Theme.Material.Dialog">
+        <item name="android:colorBackground">#FF0A0505</item>
+        <item name="android:windowBackground">#FF0A0505</item>
+        <item name="android:textColorPrimary">#FFFF2000</item>
+        <item name="android:textColorSecondary">#FFCC1A00</item>
+        <item name="android:textColorHint">#FF801000</item>
+        <item name="android:colorAccent">#FFCC1A00</item>
+        <item name="android:colorControlNormal">#FF801000</item>
+        <item name="android:colorControlActivated">#FFFF2000</item>
+        <item name="android:colorControlHighlight">#33FF2000</item>
+        <item name="android:textColorAlertDialogListItem">#FFFF2000</item>
+        <item name="android:textColorHighlight">#55FF2000</item>
+        <item name="android:colorPrimary">#FFCC1A00</item>
+    </style>
+</resources>
