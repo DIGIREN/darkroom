@@ -6,13 +6,16 @@ on:
     tags: ['v*']
   pull_request:
 
+permissions:
+  contents: write
+
 jobs:
   apk:
     runs-on: ubuntu-latest
     env:
       KS: ${{ secrets.DEBUG_KEYSTORE_B64 }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Restore signing key
         if: env.KS != ''
@@ -24,7 +27,7 @@ jobs:
           docker run --rm -v "$PWD":/app -w /app r1-android-build ./build.sh
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: darkroom-apk
           path: darkroom.apk
