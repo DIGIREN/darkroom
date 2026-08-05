@@ -5,9 +5,13 @@ import android.content.Intent;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Matrix;
+import android.graphics.LinearGradient;
 import android.graphics.Paint;
-import android.graphics.Path;
 import android.graphics.RectF;
+import android.graphics.PorterDuff;
+import android.graphics.PorterDuffXfermode;
+import android.graphics.Shader;
+import android.graphics.Path;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
@@ -49,11 +53,11 @@ public class DarkroomWallpaper extends WallpaperService {
     static final int TRAY      = 0xFF4E2523;
     static final int TRAY_RIM  = 0xFF7A3A31;
     static final int DEV       = 0xFF67302A;
-    static final int RABBIT    = 0xFFEDE7DB;
+    static final int RABBIT    = 0xFFD6B4A2;   // cream, but under red light
     static final int OUTLINE   = 0xFF3B2622;
     static final int PINK      = 0xFFDE8F8B;
     static final int INK       = 0xFF140A0C;
-    static final int PRINT     = 0xFFEDE6D8;
+    static final int PRINT     = 0xFFCFAC96;   // paper, same
     static final int LAMP      = 0xFFC33A2E;
     static final int LAMP_HOT  = 0xFFE85A3C;
     static final int LINE      = 0xFF4A2422;
@@ -70,6 +74,7 @@ public class DarkroomWallpaper extends WallpaperService {
 
         private SensorManager sensors;
         private Sensor motionSensor;
+        private Sensor gravitySensor;
         private PowerManager.WakeLock brightLock;
         /** Smoothed linear-acceleration magnitude; rises when the device moves. */
         private float motion = 0f;
@@ -124,7 +129,7 @@ public class DarkroomWallpaper extends WallpaperService {
         // ~50fps. lockCanvas/unlockCanvasAndPost costs ~8.5ms on this device and the
         // scene draws in ~8.6ms, so 60fps is not reachable; target what is, and
         // leave a few ms idle rather than thrashing.
-        private static final int FRAME_MS = 20;
+        private static final int FRAME_MS = 16;
         // the lockscreen clock owns the top-left; keep the scene clear of it
         private static final float LINE_Y   = 152f;
         private static final float TBL_FAR  = 424f;   // table surface, far edge
@@ -132,6 +137,47 @@ public class DarkroomWallpaper extends WallpaperService {
         private static final float TBL_LIP  = 502f;   // bottom of the front apron
         private static final float FLOOR_Y  = 596f;
         private static final float RAB_X    = 142f;
+        // the safelight hangs from above the panel, so its pivot and hanger
+        // are off screen and only the cord shows
+        private static final float LAMP_PIVX = 452f, LAMP_PIVY = -46f;
+
+        // ---- hanging things -------------------------------------------
+        // The lamp, the disco ball and the prints swing from their anchors and
+        // follow whichever way the device leans.
+        // things on strings: print pins are handled with the prints themselves
+        private float lampAng, lampVel, discoAng, discoVel, lamp2Ang, lamp2Vel;
+        private final float[] prAng = new float[8], prVel = new float[8];
+
+        private float gx = 0f, gy = 1f;     // unit gravity, screen axes
+
+
+        /** One physics step. Bodies fall and bounce; hung things swing. */
+        private void stepPhysics(float dt) {
+            if (dt > 0.05f) dt = 0.05f;             // never integrate a long frame
+
+            // pendulums keep swinging even at rest, so they are always stepped
+            // Stiffer restoring force with less damping: they answer a tilt
+            // sooner and then carry the swing, which reads as weight rather
+            // than as something light being pushed around.
+            float down = (float) Math.atan2(gx, gy);    // where "hanging" points
+            lampVel += -8.8f * (float) Math.sin(lampAng - down) * dt;
+            lampVel *= (1f - 0.34f * dt);
+            lampAng += lampVel * dt;
+            discoVel += -8.2f * (float) Math.sin(discoAng - down) * dt;
+            discoVel *= (1f - 0.30f * dt);
+            discoAng += discoVel * dt;
+            lamp2Ang = 0f;      // the spot is fixed; only the ball swings
+            for (int i = 0; i < prAng.length; i++) {
+                // each sheet hangs a little differently: its own stiffness and
+                // damping, so they never swing in lockstep
+                float stiff = 11.5f + (i % 5) * 1.7f;
+                float damp = 0.52f + (i % 3) * 0.16f;
+                prVel[i] += -stiff * (float) Math.sin(prAng[i] - down) * dt;
+                prVel[i] *= (1f - damp * dt);
+                prAng[i] += prVel[i] * dt;
+            }
+
+        }
 
         private final Runnable tick = new Runnable() {
             public void run() { draw(); }
@@ -147,6 +193,11 @@ public class DarkroomWallpaper extends WallpaperService {
                 motionSensor = sensors.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION);
                 if (motionSensor == null) {
                     motionSensor = sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
+                }
+                // tilt: which way is down, so the room can pour that way
+                gravitySensor = sensors.getDefaultSensor(Sensor.TYPE_GRAVITY);
+                if (gravitySensor == null) {
+                    gravitySensor = sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
                 }
             }
             for (int i = 0; i < 2; i++) {          // start with a small backlog
@@ -165,6 +216,25 @@ public class DarkroomWallpaper extends WallpaperService {
 
         @Override public void onSensorChanged(SensorEvent e) {
             float x = e.values[0], y = e.values[1], z = e.values[2];
+
+            if (e.sensor == gravitySensor && e.sensor.getType() == Sensor.TYPE_GRAVITY) {
+                // The vector points up in the world; down on screen is +y.
+                // Lying flat there is no in-plane component at all - gravity is
+                // straight through the glass - so fade back to plain screen-down
+                // rather than letting sensor noise decide which way things fall.
+                float px = x / SensorManager.GRAVITY_EARTH;
+                float py = y / SensorManager.GRAVITY_EARTH;
+                float inPlane = (float) Math.sqrt(px * px + py * py);
+                if (inPlane < 0.35f) {
+                    float k = inPlane / 0.35f;          // 0 flat, 1 upright
+                    px = px * k;
+                    py = py * k + (1f - k);             // ...toward straight down
+                }
+                gx = px;
+                gy = py;
+                return;
+            }
+
             float mag = (float) Math.sqrt(x * x + y * y + z * z);
             if (e.sensor.getType() == Sensor.TYPE_ACCELEROMETER) {
                 mag = Math.abs(mag - SensorManager.GRAVITY_EARTH);   // crude fallback
@@ -172,6 +242,8 @@ public class DarkroomWallpaper extends WallpaperService {
             motion = motion * 0.80f + mag * 0.20f;
 
             long now = SystemClock.uptimeMillis();
+
+
             if (motion > PICKUP_THRESHOLD && now - lastBrighten > 5000L) {
                 lastBrighten = now;
                 alert = 1f;
@@ -197,6 +269,10 @@ public class DarkroomWallpaper extends WallpaperService {
                 if (vis) {
                     sensors.registerListener(this, motionSensor,
                                              SensorManager.SENSOR_DELAY_NORMAL);
+                    if (gravitySensor != null) {
+                        sensors.registerListener(this, gravitySensor,
+                                                 SensorManager.SENSOR_DELAY_GAME);
+                    }
                 } else {
                     sensors.unregisterListener(this);
                     motion = 0f;
@@ -299,11 +375,13 @@ public class DarkroomWallpaper extends WallpaperService {
             }
             groove += ((musicOn ? 1f : 0f) - groove) * (1f - (float) Math.exp(-dt * 0.91f));
 
+            stepPhysics(dt);
             stirPhase   += dt * (1.4f + 2.6f * agitate);
             ripplePhase += dt * (0.5f + 1.1f * agitate);
             sloshPhase  += dt * (3.0f + 3.0f * agitate);
             ballPhase   += dt * 1.7f;
 
+            // nobody is printing while the room is on the floor
             develop += 0.0242f * dt * (1f + 1.4f * agitate);
             if (develop >= 1f) {
                 develop = 0f;
@@ -333,12 +411,15 @@ public class DarkroomWallpaper extends WallpaperService {
             drawWall(c);
             drawShelf(c);
             drawDryingLine(c, t);
-            drawTable(c);
-            drawEnlarger(c);
+               drawTable(c);     
+            drawEnlarger(c);  
             drawTrays(c, t);
-            drawDeskTimer(c);
-            drawRabbit(c, t);
+               drawDeskTimer(c); 
+              drawRabbit(c, t); 
+            drawRoomLight(c, t, dt);
+            drawTimerGlow(c);
             drawSafelight(c, t);
+            drawDiscoLamp(c);
             drawDiscoBall(c);
             drawGrain(c, t);
 
@@ -432,10 +513,13 @@ public class DarkroomWallpaper extends WallpaperService {
             p.setStyle(Paint.Style.FILL);
             p.setColor(WALL);
             c.drawRect(0, 0, 480, TBL_FAR, p);
+            c.save();
+            c.rotate((float) Math.toDegrees(lampAng), LAMP_PIVX, LAMP_PIVY);   // halo follows
             p.setColor(BG_GLOW);
-            c.drawCircle(448, 120, 116, p);
+            c.drawCircle(452, 120, 116, p);
             p.setColor(blend(BG_GLOW, LAMP, 0.22f));
-            c.drawCircle(448, 120, 60, p);
+            c.drawCircle(452, 120, 60, p);
+            c.restore();
             p.setColor(BG);
             c.drawRect(0, TBL_FAR, 480, FLOOR_Y, p);   // under-table, table draws over
             p.setColor(FLOOR);
@@ -443,13 +527,14 @@ public class DarkroomWallpaper extends WallpaperService {
         }
 
         /** Chemistry shelf on the left wall - bottles as plain blocks. */
+        /** The plank is bolted to the wall; only its contents come off. */
         private void drawShelf(Canvas c) {
             box(c, 6, 300, 112, 307, GEAR, GEAR_EDGE);       // plank
-            box(c, 22, 262, 42, 300, GEAR, GEAR_EDGE);       // bottles
+            box(c, 22, 262, 42, 300, GEAR, GEAR_EDGE);
             box(c, 50, 250, 74, 300, GEAR, GEAR_EDGE);
             box(c, 70, 272, 84, 300, GEAR, GEAR_EDGE);
             box(c, 88, 258, 106, 300, GEAR, GEAR_EDGE);
-            box(c, 16, 236, 26, 262, GEAR, GEAR_EDGE);       // graduate
+            box(c, 16, 236, 26, 262, GEAR, GEAR_EDGE);
         }
 
         /**
@@ -495,7 +580,8 @@ public class DarkroomWallpaper extends WallpaperService {
                 if (fade <= 0.02f) continue;
                 float py   = LINE_Y + 10 + 7 * (float) Math.sin(px * 0.021f);
                 float rise = (1f - fade) * 26f;          // drifts up into place
-                float sway = 2.4f * (float) Math.sin(t * 0.9 + i * 1.7);
+                float sway = (float) Math.toDegrees(prAng[i % prAng.length])
+                           + 2.4f * (float) Math.sin(t * 0.9 + i * 1.7);
                 c.save();
                 c.translate(px, py + rise);
                 c.rotate(sway);
@@ -555,11 +641,20 @@ public class DarkroomWallpaper extends WallpaperService {
             int min = (int) ((remain / 60) % 60), sec = (int) (remain % 60);
             double ma = Math.toRadians((min + sec / 60.0) * 6 - 90);
             double sa = Math.toRadians(sec * 6 - 90);
-            p.setColor(LAMP);
+            // luminous hands: they pick up a glow as the room goes dark, the
+            // way a real darkroom timer's paint does
+            float glow = groove;
+            p.setColor(withAlpha(0xFF8CE0B0, (int) (70 * glow)));
+            p.setStrokeWidth(6.5f);
+            c.drawLine(cx, cy, (float) (cx + Math.cos(ma) * r * 0.55f),
+                       (float) (cy + Math.sin(ma) * r * 0.55f), p);
+            c.drawLine(cx, cy, (float) (cx + Math.cos(sa) * r * 0.85f),
+                       (float) (cy + Math.sin(sa) * r * 0.85f), p);
+            p.setColor(blend(LAMP, 0xFFBFF5D2, glow * 0.8f));
             p.setStrokeWidth(2.4f);
             c.drawLine(cx, cy, (float) (cx + Math.cos(ma) * r * 0.55f),
                        (float) (cy + Math.sin(ma) * r * 0.55f), p);
-            p.setColor(LAMP_HOT);
+            p.setColor(blend(LAMP_HOT, 0xFFD8FFE6, glow * 0.8f));
             p.setStrokeWidth(1.3f);
             c.drawLine(cx, cy, (float) (cx + Math.cos(sa) * r * 0.85f),
                        (float) (cy + Math.sin(sa) * r * 0.85f), p);
@@ -591,7 +686,7 @@ public class DarkroomWallpaper extends WallpaperService {
 
         /** Three baths in a row. The first is the developer, and holds the print. */
         private void drawTrays(Canvas c, float t) {
-            drawBath(c, t, 224, 452, true);
+            drawBath(c, t, 224, 452, true); 
             drawBath(c, t, 286, 452, false);
             drawBath(c, t, 342, 452, false);
         }
@@ -752,6 +847,7 @@ public class DarkroomWallpaper extends WallpaperService {
             c.rotate(lean, PIVX, PIVY);
             c.scale(1f, 1f + breathe, PIVX, PIVY);
 
+
             // nose then muzzle, both behind the head
             p.setStyle(Paint.Style.FILL);
             p.setColor(PINK);
@@ -793,6 +889,21 @@ public class DarkroomWallpaper extends WallpaperService {
 
                 cachedEarF = earF; cachedEarN = earN;
             }
+
+            // Everything of him blocks the mirror light except the far ear,
+            // which the spots play across. Same silhouette he is drawn from,
+            // minus that ear.
+            rabM.setTranslate(RAB_X, 0);
+            rabM.preRotate(lean, PIVX, PIVY);
+            rabM.preScale(1f, 1f + breathe, PIVX, PIVY);
+            path2.set(torso);
+            polyInto(maskTmp, new float[]{-12,28, -7,-62, 7,-62, 12,28});
+            mtx.setRotate(earN);
+            mtx.postTranslate(45, 342);
+            maskTmp.transform(mtx);
+            path2.op(maskTmp, Path.Op.UNION);           // near ear only
+            rabMask.reset();
+            path2.transform(rabM, rabMask);
             drawShape(c, silhouette, RABBIT, OUTLINE, 2.4f);
 
             // near arm; tongs reach so the developing sheet stays visible
@@ -835,6 +946,8 @@ public class DarkroomWallpaper extends WallpaperService {
             float by = -62f + groove * 146f;          // hidden above -> hanging higher
             int a = (int) (255 * Math.min(1f, groove * 1.6f));
 
+            c.save();
+            c.rotate((float) Math.toDegrees(discoAng), bx, 0);   // hangs from the cord
             p.setStyle(Paint.Style.STROKE);
             p.setStrokeWidth(2f);
             p.setColor(withAlpha(LINE, a));
@@ -885,6 +998,7 @@ public class DarkroomWallpaper extends WallpaperService {
                            by + (float) Math.sin(ang) * rr * 4.4f, p);
             }
             p.setStyle(Paint.Style.FILL);
+            c.restore();
         }
 
         /** 0..1 spike that fires briefly every `period` seconds. */
@@ -893,27 +1007,383 @@ public class DarkroomWallpaper extends WallpaperService {
             return ph < 0.06f ? (float) Math.sin(ph / 0.06f * Math.PI) : 0f;
         }
 
+        /**
+         * The room is lit by one swinging lamp. Everything is dropped into
+         * near-darkness, then the beam is added back on top: three nested
+         * wedges with a long vertical falloff, so the edge fades instead of
+         * ending, and dust drifting through the light.
+         */
+        private final Paint lp = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private Shader coneShade;
+        // Darkness is the screen minus the beam. Filling three huge clipped
+        // rects per frame cost 18 ms; a prebuilt path per band costs a fill of
+        // the actual dark area, and only rebuilds when the lamp has moved
+        // enough to matter.
+        private final Path[] darkBand = {new Path(), new Path()};
+        private final Path bandTmp = new Path();
+        // no antialiasing on the big dark fills: the edge is already feathered
+        // by the bands themselves, and AA on a full-screen path is expensive
+        private final Paint dimPaint = new Paint();
+        private float cachedBandAng = 999f;
+        // the rabbit's head and ears in scene coords, so the disco projection
+        // can be clipped by it instead of painting across his face
+        private final Path rabMask = new Path();
+        private final Path maskTmp = new Path();
+        // the enlarger stands in the light too
+        private final Path gearMask = new Path();
+        private boolean gearMaskBuilt = false;
+        private final Matrix rabM = new Matrix();
+
+        /** Wedge from the bulb, widening as it falls. */
+        private void conePath(float spread, float reach) {
+            path.reset();
+            path.moveTo(452 - 22, 99);
+            path.lineTo(452 + 22, 99);
+            path.lineTo(452 + spread, reach);
+            path.lineTo(452 - spread, reach);
+            path.close();
+        }
+
+        private void drawRoomLight(Canvas c, float t, float dt) {
+            // Darkness is painted around the beam rather than light being
+            // painted into it: everything the cone covers keeps its own
+            // colour, so objects standing in it are genuinely lit while the
+            // rest of the room is crushed toward black.
+            float dark = 0.045f + 0.34f * groove;   // working light vs disco
+
+            final float[] spread = {410, 230};
+            final float[] level  = {1.0f, 0.45f};
+
+            float qAng = Math.round(lampAng * 120f) / 120f;   // ~0.5 degree steps
+            if (qAng != cachedBandAng) {
+                cachedBandAng = qAng;
+                mtx.setRotate((float) Math.toDegrees(qAng), LAMP_PIVX, LAMP_PIVY);
+                for (int i = 0; i < spread.length; i++) {
+                    conePath(spread[i], 900);
+                    path.transform(mtx);
+                    bandTmp.reset();
+                    bandTmp.addRect(0, 0, 480, 640, Path.Direction.CW);
+                    bandTmp.op(path, Path.Op.DIFFERENCE);     // screen minus beam
+                    darkBand[i].set(bandTmp);
+                }
+            }
+
+            dimPaint.setStyle(Paint.Style.FILL);
+            for (int i = 0; i < darkBand.length; i++) {
+                dimPaint.setColor(withAlpha(0x050203, (int) (255 * dark * level[i])));
+                c.drawPath(darkBand[i], dimPaint);
+            }
+
+            c.save();
+            c.rotate((float) Math.toDegrees(lampAng), LAMP_PIVX, LAMP_PIVY);
+
+            // a breath of warm haze in the beam itself, no more than before
+            if (coneShade == null) {
+                coneShade = new LinearGradient(452, 99, 452, 780,
+                        new int[] {0x40FF7A4A, 0x22E85A3C, 0x0EC33A2E, 0x00000000},
+                        new float[] {0f, 0.30f, 0.66f, 1f}, Shader.TileMode.CLAMP);
+            }
+            lp.setShader(coneShade);
+            lp.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.SCREEN));
+            lp.setAlpha(80);  conePath(360, 780); c.drawPath(path, lp);
+
+            lp.setShader(null);
+            lp.setXfermode(null);
+            c.restore();
+
+            drawDiscoLight(c, t);
+        }
+
+        /** The luminous hands, re-struck over the darkness so they cut through. */
+        private void drawTimerGlow(Canvas c) {
+            if (groove < 0.02f) return;             // only once the lights drop
+            float cx = 68, cy = 428, r = 21f;
+            long end = TimerActivity.sceneEndAt;
+            long remain = end > 0 ? Math.max(0, (end - System.currentTimeMillis()) / 1000) : 0;
+            int min = (int) ((remain / 60) % 60), sec = (int) (remain % 60);
+            double ma = Math.toRadians((min + sec / 60.0) * 6 - 90);
+            double sa = Math.toRadians(sec * 6 - 90);
+            float glow = groove;
+
+            lp.setShader(null);
+            lp.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.SCREEN));
+            lp.setStyle(Paint.Style.STROKE);
+            lp.setStrokeCap(Paint.Cap.ROUND);
+
+            lp.setColor(withAlpha(0xFF6FE3A0, (int) (130 * glow)));
+            lp.setStrokeWidth(7f);
+            c.drawLine(cx, cy, (float) (cx + Math.cos(ma) * r * 0.55f),
+                       (float) (cy + Math.sin(ma) * r * 0.55f), lp);
+            c.drawLine(cx, cy, (float) (cx + Math.cos(sa) * r * 0.85f),
+                       (float) (cy + Math.sin(sa) * r * 0.85f), lp);
+
+            lp.setColor(withAlpha(0xFFD8FFE6, (int) (230 * glow)));
+            lp.setStrokeWidth(2.4f);
+            c.drawLine(cx, cy, (float) (cx + Math.cos(ma) * r * 0.55f),
+                       (float) (cy + Math.sin(ma) * r * 0.55f), lp);
+            lp.setStrokeWidth(1.3f);
+            c.drawLine(cx, cy, (float) (cx + Math.cos(sa) * r * 0.85f),
+                       (float) (cy + Math.sin(sa) * r * 0.85f), lp);
+
+            lp.setStyle(Paint.Style.FILL);
+            lp.setXfermode(null);
+        }
+
+        // Where the second lamp hangs and what it aims at. Both descend with
+        // the ball, so the rig arrives together.
+        private float lamp2X() { return 176f; }
+        private float lamp2Y() { return -70f + groove * 150f; }
+        private float ballX()  { return 300f; }
+        private float ballY()  { return -62f + groove * 146f; }
+
+        /** Where a hung thing actually is once it has swung. */
+        private float swungX(float x, float y, float ang) {
+            return x - y * (float) Math.sin(ang);
+        }
+
+        private float swungY(float y, float ang) {
+            return y * (float) Math.cos(ang);
+        }
+
+        /**
+         * Which way the lamp is pointing: aimed at the ball where it rests,
+         * plus however far it has swung. The beam that is drawn and the beam
+         * the trace uses are the same vector, so what you see is what lights.
+         */
+        private float lampAim() {
+            float dx = ballX() - lamp2X(), dy = ballY() - lamp2Y();
+            return (float) Math.atan2(dy, dx) + lamp2Ang;
+        }
+
+        /** A small art light on a stem, lowered in and aimed at the ball. */
+        private void drawDiscoLamp(Canvas c) {
+            if (groove < 0.02f) return;
+            int a = (int) (255 * Math.min(1f, groove * 1.6f));
+            float lx = lamp2X(), ly = lamp2Y();
+
+            c.save();
+            c.rotate((float) Math.toDegrees(lamp2Ang), lx, 0);
+
+            p.setStyle(Paint.Style.FILL);
+            p.setColor(withAlpha(LINE, a));
+            c.drawRect(lx - 2, 0, lx + 2, ly - 6, p);       // stem
+            c.drawCircle(lx, ly - 6, 5, p);                 // yoke
+
+            // barrel pointing at the ball
+            float dx = ballX() - lx, dy = ballY() - ly;
+            float aim = (float) Math.toDegrees(Math.atan2(dy, dx));
+            c.save();
+            c.rotate(aim, lx, ly);
+            p.setColor(withAlpha(GEAR, a));
+            c.drawRect(lx - 9, ly - 7, lx + 17, ly + 7, p);     // body
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(1.6f);
+            p.setColor(withAlpha(GEAR_EDGE, a));
+            c.drawRect(lx - 9, ly - 7, lx + 17, ly + 7, p);
+            c.drawLine(lx + 6, ly - 7, lx + 6, ly + 7, p);     // barrel ring
+            p.setStyle(Paint.Style.FILL);
+            p.setColor(withAlpha(LAMP_HOT, a));                 // lens
+            c.drawRect(lx + 17, ly - 5, lx + 20, ly + 5, p);
+            c.restore();
+
+            // the throw, as three nested wedges so the edge falls off softly
+            float len = (float) Math.sqrt(dx * dx + dy * dy);
+            float aimR = (float) Math.atan2(dy, dx);
+            float ux = (float) Math.cos(aimR), uy = (float) Math.sin(aimR);
+            float px = -uy, py = ux;
+            // a gradient down the beam so it thins out rather than stopping
+            // at a flat line, and nested wedges so the sides are soft too
+            float ex = lx + ux * (len + 40f), ey = ly + uy * (len + 40f);
+            Shader throwShade = new LinearGradient(lx, ly, ex, ey,
+                    new int[] {withAlpha(LAMP_HOT, (int) (a * 0.26f)),
+                               withAlpha(LAMP_HOT, (int) (a * 0.13f)),
+                               withAlpha(LAMP_HOT, 0)},
+                    new float[] {0f, 0.6f, 1f}, Shader.TileMode.CLAMP);
+            lp.setShader(throwShade);
+            lp.setXfermode(null);
+            for (int b = 0; b < 3; b++) {
+                float wide = 22f + b * 22f;
+                lp.setAlpha(150 - b * 45);
+                path.reset();
+                path.moveTo(lx + ux * 20 + px * 5, ly + uy * 20 + py * 5);
+                path.lineTo(lx + ux * 20 - px * 5, ly + uy * 20 - py * 5);
+                path.lineTo(lx + ux * (len + 40f) - px * wide,
+                            ly + uy * (len + 40f) - py * wide);
+                path.lineTo(lx + ux * (len + 40f) + px * wide,
+                            ly + uy * (len + 40f) + py * wide);
+                path.close();
+                c.drawPath(path, lp);
+            }
+            lp.setShader(null);
+            lp.setAlpha(255);
+            c.restore();
+        }
+
+        /**
+         * Mirror-ball light, actually traced: the ball is a sphere of small
+         * facets, each one reflecting the second lamp. A facet is lit when its
+         * normal faces the lamp; the reflected ray is thrown into the room and
+         * drawn where it lands. The spots sweep and wink out at the terminator
+         * the way real ones do, and nothing about it can seam or jump because
+         * it is all continuous rotation.
+         */
+        private static final int LATS = 26, LONS = 60;   // ~1560 facets
+        // beam half-angles: full brightness inside, fading to nothing outside
+        private static final float COS_INNER = 0.955f;   // about 17 degrees
+        private static final float COS_OUTER = 0.855f;   // about 31 degrees
+        private final float[] cosLat = new float[LATS], sinLat = new float[LATS];
+        private final float[] cosLon = new float[LONS], sinLon = new float[LONS];
+        private boolean latBuilt = false;
+
+        private void buildGearMask() {
+            gearMask.reset();
+            gearMask.addRect(418, 246, 432, 440, Path.Direction.CW);      // column
+            gearMask.addRect(356, 246, 436, 284, Path.Direction.CW);      // lamphouse
+            polyInto(maskTmp, new float[]{372,284, 414,284, 404,308, 382,308});
+            gearMask.op(maskTmp, Path.Op.UNION);                          // lens cone
+            polyInto(maskTmp, new float[]{385,437, 427,437, 447,467, 365,467});
+            gearMask.op(maskTmp, Path.Op.UNION);                          // baseboard
+            gearMaskBuilt = true;
+        }
+
+        private void drawDiscoLight(Canvas c, float t) {
+            if (groove < 0.02f) return;
+            // both of them swing, and both ends of the light path matter
+            float bx = swungX(ballX(), ballY(), discoAng);
+            float by = swungY(ballY(), discoAng);
+            if (!gearMaskBuilt) buildGearMask();
+
+            // Where the lamp actually hangs, in three dimensions: it sits in
+            // front of the ball, which is what throws the reflections wide.
+            float lx = swungX(lamp2X(), lamp2Y(), lamp2Ang);
+            float ly = swungY(lamp2Y(), lamp2Ang);
+            final float LZ = 150f, R = 34f, WALL = 300f;
+            // Beam axis in three dimensions. At rest it points exactly at the
+            // ball centre; the lamp's swing rotates it in the plane of the
+            // screen, which is what walks the reflections off the ball.
+            float aim = lampAim();
+            float flat = (float) Math.hypot(ballX() - lamp2X(), ballY() - lamp2Y());
+            float axx = (float) Math.cos(aim) * flat;
+            float axy = (float) Math.sin(aim) * flat;
+            float axz = -LZ;
+            float an = (float) Math.sqrt(axx * axx + axy * axy + axz * axz);
+            axx /= an; axy /= an; axz /= an;
+
+            lp.setShader(null);
+            lp.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.SCREEN));
+            c.save();
+            c.clipRect(0, 0, 480, TBL_NEAR);        // nothing lands on the floor
+            c.clipOutPath(rabMask);                 // he stands in front of it
+            c.clipOutPath(gearMask);                // so does the enlarger
+
+            if (!latBuilt) {
+                for (int i = 0; i < LATS; i++) {
+                    double lat = Math.toRadians(-72 + i * (144.0 / (LATS - 1)));
+                    cosLat[i] = (float) Math.cos(lat);
+                    sinLat[i] = (float) Math.sin(lat);
+                }
+                latBuilt = true;
+            }
+            for (int k = 0; k < LONS; k++) {          // spin is common to all rows
+                double lon = k * (Math.PI * 2 / LONS) + ballPhase * 0.13;
+                cosLon[k] = (float) Math.cos(lon);
+                sinLon[k] = (float) Math.sin(lon);
+            }
+
+            for (int i = 0; i < LATS; i++) {
+                float cl = cosLat[i], sl = sinLat[i];
+                for (int k = 0; k < LONS; k++) {
+                    float nx = cl * cosLon[k];
+                    float ny = sl;
+                    float nz = cl * sinLon[k];
+
+                    // this facet's own place on the ball
+                    float px3 = bx + R * nx, py3 = by + R * ny, pz3 = R * nz;
+
+                    // and its own direction to the lamp - per facet, so moving
+                    // either end re-aims every reflection independently
+                    float ldx = lx - px3, ldy = ly - py3, ldz = LZ - pz3;
+                    float ld = (float) Math.sqrt(ldx * ldx + ldy * ldy + ldz * ldz);
+                    ldx /= ld; ldy /= ld; ldz /= ld;
+
+                    float ndl = nx * ldx + ny * ldy + nz * ldz;
+                    if (ndl <= 0.08f) continue;             // facet faces away
+
+                    // is this facet actually standing in the beam? the cone
+                    // has a soft shoulder, so swinging the lamp off the ball
+                    // fades the reflections out instead of cutting them
+                    float inCone = -(ldx * axx + ldy * axy + ldz * axz);
+                    if (inCone <= COS_OUTER) continue;
+                    float lit = inCone >= COS_INNER ? 1f
+                            : (inCone - COS_OUTER) / (COS_INNER - COS_OUTER);
+                    lit *= lit;
+
+                    // mirror the incoming ray about the facet
+                    float rx = 2 * ndl * nx - ldx;
+                    float ry = 2 * ndl * ny - ldy;
+                    float rz = 2 * ndl * nz - ldz;
+                    if (rz > -0.10f) continue;              // not heading into the room
+
+                    // and follow it to the back wall
+                    float tHit = (-WALL - pz3) / rz;
+                    if (tHit <= 0) continue;
+                    float sx = px3 + rx * tHit;
+                    float sy = py3 + ry * tHit;
+                    if (sx < -30 || sx > 510 || sy < -30 || sy > 670) continue;
+
+                    float size = 2.2f + tHit * 0.009f;
+                    int col = ((i + k) % 3 == 0) ? PINK
+                            : ((i + k) % 3 == 1) ? LAMP_HOT : PRINT;
+                    // brightness by facet angle, thinning with throw distance
+                    int alpha = (int) (groove * 900f * ndl * ndl * lit
+                                       * (1200f / (1200f + tHit)));
+                    if (alpha <= 3) continue;
+                    lp.setColor(withAlpha(col, Math.min(255, alpha)));
+                    c.drawRect(sx - size, sy - size * 0.85f,
+                               sx + size, sy + size * 0.85f, lp);
+                }
+            }
+
+            c.restore();
+            lp.setXfermode(null);
+        }
+
         private void drawSafelight(Canvas c, float t) {
             float flick = 0.90f + 0.10f * (float) Math.sin(t * 3.1)
                                  * (float) Math.sin(t * 1.31);
+            c.save();
+            c.rotate((float) Math.toDegrees(lampAng), LAMP_PIVX, LAMP_PIVY);   // hangs from the cord
             p.setStyle(Paint.Style.FILL);
             p.setColor(LINE);
-            c.drawRect(446, 18, 458, 62, p);
+            c.drawRect(446, LAMP_PIVY, 458, 62, p);     // cord, from off screen
             p.setColor(LAMP);
-            path.reset();
-            path.moveTo(414, 62); path.lineTo(480, 62);
-            path.lineTo(480, 92); path.lineTo(428, 92);
+            path.reset();                               // full conical shade
+            path.moveTo(410, 62); path.lineTo(494, 62);
+            path.lineTo(478, 92); path.lineTo(426, 92);
             path.close();
             c.drawPath(path, p);
+            p.setColor(blend(LAMP, INK, 0.25f));        // rim under the shade
+            c.drawRect(426, 90, 478, 94, p);
             p.setColor(withAlpha(LAMP_HOT, (int) (235 * flick)));
-            c.drawRect(430, 88, 480, 97, p);
+            c.drawRect(428, 92, 476, 99, p);            // hot bulb line
 
             p.setColor(withAlpha(LAMP, (int) (15 * flick)));
             path.reset();
-            path.moveTo(432, 97); path.lineTo(478, 97);
-            path.lineTo(460, TBL_FAR); path.lineTo(210, TBL_FAR);
+            // symmetric about the bulb centre (452); the right half runs off
+            // the panel until the lamp swings, which is when it shows
+            path.moveTo(430, 99); path.lineTo(474, 99);
+            path.lineTo(760, 700); path.lineTo(144, 700);
             path.close();
-            c.drawPath(path, p);
+            // fade it out down its length so it does not stop dead at the bench
+            lp.setXfermode(null);
+            lp.setShader(new LinearGradient(452, 99, 452, 660,
+                    new int[] {withAlpha(LAMP, (int) (20 * flick)),
+                               withAlpha(LAMP, (int) (10 * flick)),
+                               withAlpha(LAMP, 0)},
+                    new float[] {0f, 0.55f, 1f}, Shader.TileMode.CLAMP));
+            c.drawPath(path, lp);
+            lp.setShader(null);
+            c.restore();
         }
 
         private void drawGrain(Canvas c, float t) {
