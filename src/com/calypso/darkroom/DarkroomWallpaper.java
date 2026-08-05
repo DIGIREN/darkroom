@@ -156,6 +156,9 @@ public class DarkroomWallpaper extends WallpaperService {
         private boolean roomAwake = false;
         private long lastLockPoll = 0;
 
+        /** Sideways acceleration, smoothed: a moved device shoves the bobs. */
+        private float stirX = 0f;
+
         private boolean shouldSwing() {
             long now = SystemClock.uptimeMillis();
             if (now - lastLockPoll > 700L) {          // binder call, so poll it
@@ -180,10 +183,14 @@ public class DarkroomWallpaper extends WallpaperService {
             // sooner and then carry the swing, which reads as weight rather
             // than as something light being pushed around.
             float down = (float) Math.atan2(gx, gy);    // where "hanging" points
+            // gravity pulls them plumb, movement shoves them: swinging the
+            // device sideways throws every bob the other way, like real ones
             lampVel += -30.0f * (float) Math.sin(lampAng - down) * dt;
+            lampVel += -stirX * 0.85f * dt;
             lampVel *= (1f - 1.60f * dt);
             lampAng += lampVel * dt;
             discoVel += -28.0f * (float) Math.sin(discoAng - down) * dt;
+            discoVel += -stirX * 0.62f * dt;        // heaviest, shoved least
             discoVel *= (1f - 1.45f * dt);
             discoAng += discoVel * dt;
             lamp2Ang = 0f;      // the spot is fixed; only the ball swings
@@ -193,6 +200,7 @@ public class DarkroomWallpaper extends WallpaperService {
                 float stiff = 34.0f + (i % 5) * 3.6f;
                 float damp = 1.80f + (i % 3) * 0.30f;
                 prVel[i] += -stiff * (float) Math.sin(prAng[i] - down) * dt;
+                prVel[i] += -stirX * (1.15f + (i % 4) * 0.16f) * dt;   // paper, shoved most
                 prVel[i] *= (1f - damp * dt);
                 prAng[i] += prVel[i] * dt;
             }
@@ -260,6 +268,7 @@ public class DarkroomWallpaper extends WallpaperService {
                 mag = Math.abs(mag - SensorManager.GRAVITY_EARTH);   // crude fallback
             }
             motion = motion * 0.80f + mag * 0.20f;
+            stirX = stirX * 0.55f + x * 0.45f;
 
             long now = SystemClock.uptimeMillis();
 
