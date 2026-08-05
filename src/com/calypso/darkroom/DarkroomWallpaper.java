@@ -149,6 +149,26 @@ public class DarkroomWallpaper extends WallpaperService {
         private final float[] prAng = new float[8], prVel = new float[8];
 
         private float gx = 0f, gy = 1f;     // unit gravity, screen axes
+        // Nothing swings unless the device is being held up and the phone is
+        // unlocked. Otherwise it is in a pocket or face down on a bench, and
+        // waving the whole room about is just noise.
+        private android.app.KeyguardManager keyguard;
+        private boolean roomAwake = false;
+        private long lastLockPoll = 0;
+
+        private boolean shouldSwing() {
+            long now = SystemClock.uptimeMillis();
+            if (now - lastLockPoll > 700L) {          // binder call, so poll it
+                lastLockPoll = now;
+                if (keyguard == null) {
+                    keyguard = (android.app.KeyguardManager)
+                            getSystemService(Context.KEYGUARD_SERVICE);
+                }
+                roomAwake = keyguard == null || !keyguard.isKeyguardLocked();
+            }
+            boolean upright = gy > 0.72f && Math.abs(gx) < 0.6f;
+            return roomAwake && upright;
+        }
 
 
         /** One physics step. Bodies fall and bounce; hung things swing. */
@@ -160,18 +180,18 @@ public class DarkroomWallpaper extends WallpaperService {
             // sooner and then carry the swing, which reads as weight rather
             // than as something light being pushed around.
             float down = (float) Math.atan2(gx, gy);    // where "hanging" points
-            lampVel += -8.8f * (float) Math.sin(lampAng - down) * dt;
-            lampVel *= (1f - 0.34f * dt);
+            lampVel += -30.0f * (float) Math.sin(lampAng - down) * dt;
+            lampVel *= (1f - 1.60f * dt);
             lampAng += lampVel * dt;
-            discoVel += -8.2f * (float) Math.sin(discoAng - down) * dt;
-            discoVel *= (1f - 0.30f * dt);
+            discoVel += -28.0f * (float) Math.sin(discoAng - down) * dt;
+            discoVel *= (1f - 1.45f * dt);
             discoAng += discoVel * dt;
             lamp2Ang = 0f;      // the spot is fixed; only the ball swings
             for (int i = 0; i < prAng.length; i++) {
                 // each sheet hangs a little differently: its own stiffness and
                 // damping, so they never swing in lockstep
-                float stiff = 11.5f + (i % 5) * 1.7f;
-                float damp = 0.52f + (i % 3) * 0.16f;
+                float stiff = 34.0f + (i % 5) * 3.6f;
+                float damp = 1.80f + (i % 3) * 0.30f;
                 prVel[i] += -stiff * (float) Math.sin(prAng[i] - down) * dt;
                 prVel[i] *= (1f - damp * dt);
                 prAng[i] += prVel[i] * dt;
